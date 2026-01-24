@@ -3,20 +3,17 @@ pragma solidity ^0.8.0;
 
 /**
  * @title RentalPlatform
- * @dev Complete P2P rental platform for physical assets
+ * @dev P2P rental platform for physical assets
  * 
- * FEATURES IMPLEMENTED:
- * ✅ Asset Registry - Register, update, and manage rental items
- * ✅ Dual Handshake Mechanism - Both parties confirm pickup/return
- * ✅ Collateral Management - Safety bonds locked and released automatically
- * ✅ Payment Processing - Automatic fee deduction and distribution
- * ✅ Late Penalty System - 5% per hour penalty for late returns
- * ✅ Reputation Tracking - Score updates based on rental performance
+ * IMPLEMENTATION STATUS:
+ * ✅ Phase 1: Asset Registry - COMPLETED
+ * ✅ Phase 2-C: Dual Pickup Confirmation with Handshake - COMPLETED
+ * ⏳ Phase 2-D: Return Confirmation Logic - PENDING
  */
 contract RentalPlatform {
     
     // ============================================
-    // STATE VARIABLES
+    // STATE VARIABLES - ASSET REGISTRY
     // ============================================
     
     struct PhysicalAsset {
@@ -28,6 +25,14 @@ contract RentalPlatform {
         bool isAvailable;
     }
     
+    mapping(uint256 => PhysicalAsset) public assets;
+    uint256 public assetCount;
+    address public contractOwner;
+    
+    // ============================================
+    // STATE VARIABLES - RENTAL AGREEMENTS
+    // ============================================
+    
     enum RentalStatus { Pending, Active, Completed, Disputed, Cancelled }
     
     struct RentalAgreement {
@@ -35,25 +40,38 @@ contract RentalPlatform {
         address borrower;
         uint256 startTime;
         uint256 endTime;
-        bool ownerPickedUp;
-        bool borrowerPickedUp;
-        bool ownerReturned;
-        bool borrowerReturned;
         RentalStatus status;
         uint256 actualReturnTime;
         uint256 rentalDuration;
     }
     
-    mapping(uint256 => PhysicalAsset) public assets;
     mapping(uint256 => RentalAgreement) public rentals;
+    uint256 public rentalCount;
+    
+    // Track active rental for each asset
     mapping(uint256 => uint256) public activeRentalForAsset;
+    
+    // ============================================
+    // STATE VARIABLES - PHASE 2-C: HANDSHAKE LOGIC
+    // ============================================
+    
+    // Handshake count for pickup confirmation (assetId => count)
+    mapping(uint256 => uint256) public handshakeCount;
+    
+    // Track who has confirmed pickup
+    mapping(uint256 => mapping(address => bool)) public hasConfirmedPickup;
+    
+    // ============================================
+    // STATE VARIABLES - COLLATERAL & REPUTATION
+    // ============================================
+    
     mapping(address => uint256) public safetyBondsLocked;
     mapping(address => int256) public reputationScore;
     mapping(address => uint256) public totalRentalsCompleted;
     
-    uint256 public assetCount;
-    uint256 public rentalCount;
-    address public contractOwner;
+    // ============================================
+    // CONSTANTS
+    // ============================================
     
     uint256 public constant LATE_PENALTY_RATE = 5;
     uint256 public constant PENALTY_TIME_UNIT = 1 hours;
@@ -67,12 +85,13 @@ contract RentalPlatform {
     event AssetRegistered(uint256 indexed assetId, address indexed owner, string name, uint256 rentalFee, uint256 safetyBond);
     event AssetUpdated(uint256 indexed assetId, uint256 rentalFee, uint256 safetyBond);
     event RentalCreated(uint256 indexed rentalId, uint256 indexed assetId, address indexed borrower, uint256 endTime);
-    event PickupConfirmed(uint256 indexed rentalId, address indexed confirmer, bool isOwner);
-    event RentalActivated(uint256 indexed rentalId, uint256 startTime);
-    event ReturnConfirmed(uint256 indexed rentalId, address indexed confirmer, bool isOwner);
-    event RentalCompleted(uint256 indexed rentalId, uint256 totalCharge, uint256 penalty, bool wasLate);
-    event RentalCancelled(uint256 indexed rentalId);
+    event PickupConfirmed(uint256 indexed assetId, address indexed confirmer, uint256 currentCount);
+    event RentalStarted(uint256 indexed rentalId, uint256 indexed assetId, uint256 startTime);
     event SafetyBondLocked(address indexed borrower, uint256 amount);
+    
+    // Phase 2-D events (to be used later)
+    event ReturnConfirmed(uint256 indexed assetId, address indexed owner);
+    event RentalCompleted(uint256 indexed rentalId, uint256 totalCharge, uint256 penalty, bool wasLate);
     event SafetyBondReleased(address indexed borrower, uint256 returned, uint256 deducted);
     event ReputationUpdated(address indexed user, int256 newScore, int256 change);
     
@@ -95,15 +114,6 @@ contract RentalPlatform {
         _;
     }
     
-    modifier onlyRentalParticipant(uint256 _rentalId) {
-        require(
-            msg.sender == assets[rentals[_rentalId].assetId].owner || 
-            msg.sender == rentals[_rentalId].borrower,
-            "Only rental participants"
-        );
-        _;
-    }
-    
     // ============================================
     // CONSTRUCTOR
     // ============================================
@@ -113,7 +123,7 @@ contract RentalPlatform {
     }
     
     // ============================================
-    // ASSET REGISTRY FUNCTIONS
+    // PHASE 1: ASSET REGISTRY FUNCTIONS
     // ============================================
     
     function registerAsset(
@@ -180,20 +190,26 @@ contract RentalPlatform {
         rentals[rentalCount] = RentalAgreement({
             assetId: _assetId,
             borrower: msg.sender,
-            startTime: 0,
+            startTime: 0,  // Will be set when startRental is called
             endTime: endTime,
-            ownerPickedUp: false,
-            borrowerPickedUp: false,
-            ownerReturned: false,
-            borrowerReturned: false,
             status: RentalStatus.Pending,
             actualReturnTime: 0,
             rentalDuration: _rentalDuration
         });
         
+        // Lock safety bond
         safetyBondsLocked[msg.sender] += msg.value;
+        
+        // Mark asset as unavailable
         asset.isAvailable = false;
+        
+        // Track active rental
         activeRentalForAsset[_assetId] = rentalCount;
+        
+        // Reset handshake count for this asset
+        handshakeCount[_assetId] = 0;
+        hasConfirmedPickup[_assetId][asset.owner] = false;
+        hasConfirmedPickup[_assetId][msg.sender] = false;
         
         emit RentalCreated(rentalCount, _assetId, msg.sender, endTime);
         emit SafetyBondLocked(msg.sender, msg.value);
@@ -202,152 +218,70 @@ contract RentalPlatform {
     }
     
     // ============================================
-    // PICKUP HANDSHAKE (Both parties must confirm)
+    // PHASE 2-C: PICKUP CONFIRMATION LOGIC
     // ============================================
     
-    function confirmPickup(uint256 _rentalId) 
-        public rentalExists(_rentalId) onlyRentalParticipant(_rentalId) {
-        RentalAgreement storage rental = rentals[_rentalId];
-        require(rental.status == RentalStatus.Pending, "Not pending");
+    /**
+     * @dev Confirm pickup - Part 1 of Dual Handshake
+     * Increments handshakeCount and checks if caller is owner or borrower
+     * @param _assetId ID of the asset being rented
+     */
+    function confirmPickup(uint256 _assetId) public assetExists(_assetId) {
+        // Get active rental for this asset
+        uint256 rentalId = activeRentalForAsset[_assetId];
+        require(rentalId > 0, "No active rental for this asset");
         
-        bool isOwner = (msg.sender == assets[rental.assetId].owner);
+        RentalAgreement storage rental = rentals[rentalId];
+        PhysicalAsset storage asset = assets[_assetId];
         
-        if (isOwner) {
-            require(!rental.ownerPickedUp, "Already confirmed");
-            rental.ownerPickedUp = true;
-        } else {
-            require(!rental.borrowerPickedUp, "Already confirmed");
-            rental.borrowerPickedUp = true;
-        }
+        require(rental.status == RentalStatus.Pending, "Rental is not pending");
         
-        emit PickupConfirmed(_rentalId, msg.sender, isOwner);
+        // Check if caller is owner or borrower
+        require(
+            msg.sender == asset.owner || msg.sender == rental.borrower,
+            "Only owner or borrower can confirm"
+        );
         
-        // Activate rental when both confirm
-        if (rental.ownerPickedUp && rental.borrowerPickedUp) {
-            rental.startTime = block.timestamp;
-            rental.status = RentalStatus.Active;
-            emit RentalActivated(_rentalId, rental.startTime);
-        }
+        // Check if this person already confirmed
+        require(!hasConfirmedPickup[_assetId][msg.sender], "Already confirmed pickup");
+        
+        // Mark as confirmed and increment handshake count
+        hasConfirmedPickup[_assetId][msg.sender] = true;
+        handshakeCount[_assetId]++;
+        
+        emit PickupConfirmed(_assetId, msg.sender, handshakeCount[_assetId]);
+    }
+    
+    /**
+     * @dev Start rental - Part 2 of Dual Handshake
+     * Triggered only when handshakeCount == 2
+     * The rental period starts only after dual confirmation
+     * @param _assetId ID of the asset being rented
+     */
+    function startRental(uint256 _assetId) public assetExists(_assetId) {
+        // Get active rental for this asset
+        uint256 rentalId = activeRentalForAsset[_assetId];
+        require(rentalId > 0, "No active rental for this asset");
+        
+        RentalAgreement storage rental = rentals[rentalId];
+        
+        require(rental.status == RentalStatus.Pending, "Rental already started or completed");
+        require(handshakeCount[_assetId] == 2, "Both parties must confirm pickup first");
+        
+        // Start the rental period
+        rental.startTime = block.timestamp;
+        rental.status = RentalStatus.Active;
+        
+        emit RentalStarted(rentalId, _assetId, rental.startTime);
     }
     
     // ============================================
-    // RETURN HANDSHAKE (Both parties must confirm)
+    // PHASE 2-D: RETURN CONFIRMATION (TO BE IMPLEMENTED)
     // ============================================
     
-    function confirmReturn(uint256 _rentalId) 
-        public rentalExists(_rentalId) onlyRentalParticipant(_rentalId) {
-        RentalAgreement storage rental = rentals[_rentalId];
-        require(rental.status == RentalStatus.Active, "Not active");
-        
-        bool isOwner = (msg.sender == assets[rental.assetId].owner);
-        
-        if (isOwner) {
-            require(!rental.ownerReturned, "Already confirmed");
-            rental.ownerReturned = true;
-        } else {
-            require(!rental.borrowerReturned, "Already confirmed");
-            rental.borrowerReturned = true;
-        }
-        
-        emit ReturnConfirmed(_rentalId, msg.sender, isOwner);
-        
-        // Complete rental when both confirm
-        if (rental.ownerReturned && rental.borrowerReturned) {
-            _completeRental(_rentalId);
-        }
-    }
-    
-    // ============================================
-    // PAYMENT PROCESSING & LATE PENALTIES
-    // ============================================
-    
-    function _completeRental(uint256 _rentalId) private {
-        RentalAgreement storage rental = rentals[_rentalId];
-        PhysicalAsset storage asset = assets[rental.assetId];
-        
-        rental.actualReturnTime = block.timestamp;
-        rental.status = RentalStatus.Completed;
-        
-        // Calculate rental fee
-        uint256 totalRentalFee = asset.rentalFee * rental.rentalDuration;
-        
-        // Calculate late penalty
-        uint256 penaltyAmount = 0;
-        bool wasLate = rental.actualReturnTime > rental.endTime;
-        
-        if (wasLate) {
-            uint256 lateTime = rental.actualReturnTime - rental.endTime;
-            uint256 lateUnits = (lateTime / PENALTY_TIME_UNIT) + 1;
-            penaltyAmount = (asset.safetyBond * LATE_PENALTY_RATE * lateUnits) / 100;
-            
-            if (penaltyAmount > asset.safetyBond) {
-                penaltyAmount = asset.safetyBond;
-            }
-        }
-        
-        // Calculate total charge
-        uint256 totalCharge = totalRentalFee + penaltyAmount;
-        if (totalCharge > asset.safetyBond) {
-            totalCharge = asset.safetyBond;
-        }
-        
-        uint256 amountToReturn = asset.safetyBond - totalCharge;
-        
-        // Update locked bonds
-        safetyBondsLocked[rental.borrower] -= asset.safetyBond;
-        
-        // Transfer payments
-        payable(asset.owner).transfer(totalCharge);
-        if (amountToReturn > 0) {
-            payable(rental.borrower).transfer(amountToReturn);
-        }
-        
-        // Update reputation
-        if (wasLate) {
-            reputationScore[rental.borrower] -= REPUTATION_PENALTY;
-            emit ReputationUpdated(rental.borrower, reputationScore[rental.borrower], -REPUTATION_PENALTY);
-        } else {
-            reputationScore[rental.borrower] += REPUTATION_REWARD;
-            emit ReputationUpdated(rental.borrower, reputationScore[rental.borrower], REPUTATION_REWARD);
-        }
-        
-        reputationScore[asset.owner] += REPUTATION_REWARD;
-        emit ReputationUpdated(asset.owner, reputationScore[asset.owner], REPUTATION_REWARD);
-        
-        // Update counters
-        totalRentalsCompleted[rental.borrower]++;
-        totalRentalsCompleted[asset.owner]++;
-        
-        // Make asset available
-        asset.isAvailable = true;
-        activeRentalForAsset[rental.assetId] = 0;
-        
-        emit SafetyBondReleased(rental.borrower, amountToReturn, totalCharge);
-        emit RentalCompleted(_rentalId, totalCharge, penaltyAmount, wasLate);
-    }
-    
-    // ============================================
-    // RENTAL CANCELLATION
-    // ============================================
-    
-    function cancelRental(uint256 _rentalId) public rentalExists(_rentalId) {
-        RentalAgreement storage rental = rentals[_rentalId];
-        require(rental.status == RentalStatus.Pending, "Can only cancel pending");
-        require(msg.sender == rental.borrower, "Only borrower can cancel");
-        
-        PhysicalAsset storage asset = assets[rental.assetId];
-        uint256 bondAmount = asset.safetyBond;
-        
-        safetyBondsLocked[rental.borrower] -= bondAmount;
-        asset.isAvailable = true;
-        activeRentalForAsset[rental.assetId] = 0;
-        rental.status = RentalStatus.Cancelled;
-        
-        payable(rental.borrower).transfer(bondAmount);
-        
-        emit RentalCancelled(_rentalId);
-        emit SafetyBondReleased(rental.borrower, bondAmount, 0);
-    }
+    // TODO: Implement confirmReturn() function
+    // TODO: Implement late penalty calculation
+    // TODO: Implement payment distribution
     
     // ============================================
     // VIEW FUNCTIONS
@@ -360,30 +294,39 @@ contract RentalPlatform {
     }
     
     function getRental(uint256 _rentalId) public view rentalExists(_rentalId)
-        returns (uint256, address, uint256, uint256, bool, bool, bool, bool, RentalStatus, uint256) {
+        returns (uint256, address, uint256, uint256, RentalStatus, uint256, uint256) {
         RentalAgreement memory r = rentals[_rentalId];
-        return (r.assetId, r.borrower, r.startTime, r.endTime, 
-                r.ownerPickedUp, r.borrowerPickedUp, r.ownerReturned, 
-                r.borrowerReturned, r.status, r.actualReturnTime);
+        return (r.assetId, r.borrower, r.startTime, r.endTime, r.status, r.actualReturnTime, r.rentalDuration);
     }
     
-    function isRentalLate(uint256 _rentalId) public view rentalExists(_rentalId) returns (bool) {
-        RentalAgreement memory r = rentals[_rentalId];
+    function getRentalByAsset(uint256 _assetId) public view assetExists(_assetId)
+        returns (uint256, address, uint256, uint256, RentalStatus, uint256, uint256) {
+        uint256 rentalId = activeRentalForAsset[_assetId];
+        require(rentalId > 0, "No active rental for this asset");
+        return getRental(rentalId);
+    }
+    
+    function getHandshakeStatus(uint256 _assetId) public view assetExists(_assetId)
+        returns (uint256 count, bool ownerConfirmed, bool borrowerConfirmed) {
+        uint256 rentalId = activeRentalForAsset[_assetId];
+        require(rentalId > 0, "No active rental for this asset");
+        
+        RentalAgreement memory rental = rentals[rentalId];
+        PhysicalAsset memory asset = assets[_assetId];
+        
+        return (
+            handshakeCount[_assetId],
+            hasConfirmedPickup[_assetId][asset.owner],
+            hasConfirmedPickup[_assetId][rental.borrower]
+        );
+    }
+    
+    function isRentalLate(uint256 _assetId) public view assetExists(_assetId) returns (bool) {
+        uint256 rentalId = activeRentalForAsset[_assetId];
+        if (rentalId == 0) return false;
+        
+        RentalAgreement memory r = rentals[rentalId];
         return r.status == RentalStatus.Active && block.timestamp > r.endTime;
-    }
-    
-    function calculateLatePenalty(uint256 _rentalId) public view rentalExists(_rentalId) returns (uint256) {
-        RentalAgreement memory r = rentals[_rentalId];
-        if (block.timestamp <= r.endTime) return 0;
-        
-        uint256 lateTime = block.timestamp - r.endTime;
-        uint256 lateUnits = (lateTime / PENALTY_TIME_UNIT) + 1;
-        uint256 penalty = (assets[r.assetId].safetyBond * LATE_PENALTY_RATE * lateUnits) / 100;
-        
-        if (penalty > assets[r.assetId].safetyBond) {
-            penalty = assets[r.assetId].safetyBond;
-        }
-        return penalty;
     }
     
     function getUserReputation(address _user) public view returns (int256, uint256) {
