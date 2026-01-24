@@ -3,114 +3,104 @@ pragma solidity ^0.8.0;
 
 /**
  * @title RentalPlatform
- * @dev Comprehensive P2P rental platform for physical assets
- * @notice Handles asset registry, rental agreements, collateral, and reputation
+ * @dev Complete P2P rental platform for physical assets
  * 
- * CURRENT IMPLEMENTATION:
- * - Task 1: Asset Registry (COMPLETED)
- * 
- * FUTURE TASKS (Structure ready for expansion):
- * - Task 2: Rental Agreement & Handshake Mechanism
- * - Task 3: Collateral & Reputation Tracking
- * - Task 4: Payment Processing & Late Penalties
+ * FEATURES IMPLEMENTED:
+ * ✅ Asset Registry - Register, update, and manage rental items
+ * ✅ Dual Handshake Mechanism - Both parties confirm pickup/return
+ * ✅ Collateral Management - Safety bonds locked and released automatically
+ * ✅ Payment Processing - Automatic fee deduction and distribution
+ * ✅ Late Penalty System - 5% per hour penalty for late returns
+ * ✅ Reputation Tracking - Score updates based on rental performance
  */
 contract RentalPlatform {
     
     // ============================================
-    // STATE VARIABLES - ASSET REGISTRY
+    // STATE VARIABLES
     // ============================================
     
-    /**
-     * @dev Structure to store physical asset details
-     */
     struct PhysicalAsset {
-        address owner;           // Wallet address of the lender
-        string name;            // Item name (e.g., drill, camera)
-        string description;     // Details about item's condition or use
-        uint256 rentalFee;      // Price per day/duration in Wei
-        uint256 safetyBond;     // Required collateral deposit
-        bool isAvailable;       // Flag showing if item is currently listed for rent
+        address owner;
+        string name;
+        string description;
+        uint256 rentalFee;      // Per day in Wei
+        uint256 safetyBond;
+        bool isAvailable;
     }
     
-    // Mapping to store all listed assets by unique ID
+    enum RentalStatus { Pending, Active, Completed, Disputed, Cancelled }
+    
+    struct RentalAgreement {
+        uint256 assetId;
+        address borrower;
+        uint256 startTime;
+        uint256 endTime;
+        bool ownerPickedUp;
+        bool borrowerPickedUp;
+        bool ownerReturned;
+        bool borrowerReturned;
+        RentalStatus status;
+        uint256 actualReturnTime;
+        uint256 rentalDuration;
+    }
+    
     mapping(uint256 => PhysicalAsset) public assets;
+    mapping(uint256 => RentalAgreement) public rentals;
+    mapping(uint256 => uint256) public activeRentalForAsset;
+    mapping(address => uint256) public safetyBondsLocked;
+    mapping(address => int256) public reputationScore;
+    mapping(address => uint256) public totalRentalsCompleted;
     
-    // Counter to track and generate IDs for new listings
     uint256 public assetCount;
-    
-    // Contract owner for basic maintenance
+    uint256 public rentalCount;
     address public contractOwner;
     
-    // ============================================
-    // STATE VARIABLES - RENTAL AGREEMENTS (Future Task 2)
-    // ============================================
-    
-    // TODO: Add RentalAgreement struct
-    // TODO: Add rental tracking mappings
-    // TODO: Add handshake mechanism variables
+    uint256 public constant LATE_PENALTY_RATE = 5;
+    uint256 public constant PENALTY_TIME_UNIT = 1 hours;
+    int256 public constant REPUTATION_REWARD = 5;
+    int256 public constant REPUTATION_PENALTY = 10;
     
     // ============================================
-    // STATE VARIABLES - COLLATERAL & REPUTATION (Future Task 3)
+    // EVENTS
     // ============================================
     
-    // TODO: Add safetyBondsLocked mapping
-    // TODO: Add reputationScore mapping
-    // TODO: Add totalRentalsCompleted mapping
-    
-    // ============================================
-    // CONSTANTS & SECURITY VARIABLES (Future Task 4)
-    // ============================================
-    
-    // TODO: Add LATE_PENALTY_RATE constant
-    // TODO: Add payment processing variables
-    
-    // ============================================
-    // EVENTS - ASSET REGISTRY
-    // ============================================
-    
-    event AssetRegistered(
-        uint256 indexed assetId,
-        address indexed owner,
-        string name,
-        uint256 rentalFee,
-        uint256 safetyBond
-    );
-    
-    event AssetUpdated(
-        uint256 indexed assetId,
-        uint256 rentalFee,
-        uint256 safetyBond,
-        bool isAvailable
-    );
-    
-    event AssetAvailabilityChanged(
-        uint256 indexed assetId,
-        bool isAvailable
-    );
+    event AssetRegistered(uint256 indexed assetId, address indexed owner, string name, uint256 rentalFee, uint256 safetyBond);
+    event AssetUpdated(uint256 indexed assetId, uint256 rentalFee, uint256 safetyBond);
+    event RentalCreated(uint256 indexed rentalId, uint256 indexed assetId, address indexed borrower, uint256 endTime);
+    event PickupConfirmed(uint256 indexed rentalId, address indexed confirmer, bool isOwner);
+    event RentalActivated(uint256 indexed rentalId, uint256 startTime);
+    event ReturnConfirmed(uint256 indexed rentalId, address indexed confirmer, bool isOwner);
+    event RentalCompleted(uint256 indexed rentalId, uint256 totalCharge, uint256 penalty, bool wasLate);
+    event RentalCancelled(uint256 indexed rentalId);
+    event SafetyBondLocked(address indexed borrower, uint256 amount);
+    event SafetyBondReleased(address indexed borrower, uint256 returned, uint256 deducted);
+    event ReputationUpdated(address indexed user, int256 newScore, int256 change);
     
     // ============================================
     // MODIFIERS
     // ============================================
-    
-    modifier onlyAssetOwner(uint256 _assetId) {
-        require(assets[_assetId].owner == msg.sender, "Only asset owner can perform this action");
-        _;
-    }
     
     modifier assetExists(uint256 _assetId) {
         require(_assetId > 0 && _assetId <= assetCount, "Asset does not exist");
         _;
     }
     
-    modifier validAssetDetails(string memory _name, uint256 _rentalFee, uint256 _safetyBond) {
-        require(bytes(_name).length > 0, "Asset name cannot be empty");
-        require(_rentalFee > 0, "Rental fee must be greater than 0");
-        require(_safetyBond > 0, "Safety bond must be greater than 0");
+    modifier rentalExists(uint256 _rentalId) {
+        require(_rentalId > 0 && _rentalId <= rentalCount, "Rental does not exist");
         _;
     }
     
-    modifier onlyContractOwner() {
-        require(msg.sender == contractOwner, "Only contract owner can perform this action");
+    modifier onlyAssetOwner(uint256 _assetId) {
+        require(assets[_assetId].owner == msg.sender, "Only asset owner");
+        _;
+    }
+    
+    modifier onlyRentalParticipant(uint256 _rentalId) {
+        require(
+            msg.sender == assets[rentals[_rentalId].assetId].owner || 
+            msg.sender == rentals[_rentalId].borrower,
+            "Only rental participants"
+        );
         _;
     }
     
@@ -120,33 +110,23 @@ contract RentalPlatform {
     
     constructor() {
         contractOwner = msg.sender;
-        assetCount = 0;
     }
     
     // ============================================
-    // ASSET REGISTRY FUNCTIONS (Task 1 - COMPLETED)
+    // ASSET REGISTRY FUNCTIONS
     // ============================================
     
-    /**
-     * @dev Register a new physical asset for rental
-     * @param _name Name of the asset (e.g., "Electric Drill", "DSLR Camera")
-     * @param _description Description of the asset's condition or use
-     * @param _rentalFee Rental fee per day/duration in Wei
-     * @param _safetyBond Required safety bond/collateral in Wei
-     * @return assetId The unique ID of the newly registered asset
-     */
     function registerAsset(
         string memory _name,
         string memory _description,
         uint256 _rentalFee,
         uint256 _safetyBond
-    ) 
-        public 
-        validAssetDetails(_name, _rentalFee, _safetyBond)
-        returns (uint256) 
-    {
-        assetCount++;
+    ) public returns (uint256) {
+        require(bytes(_name).length > 0, "Name cannot be empty");
+        require(_rentalFee > 0, "Rental fee must be > 0");
+        require(_safetyBond > 0, "Safety bond must be > 0");
         
+        assetCount++;
         assets[assetCount] = PhysicalAsset({
             owner: msg.sender,
             name: _name,
@@ -157,206 +137,290 @@ contract RentalPlatform {
         });
         
         emit AssetRegistered(assetCount, msg.sender, _name, _rentalFee, _safetyBond);
-        
         return assetCount;
     }
     
-    /**
-     * @dev Update asset pricing (rental fee and safety bond)
-     * @param _assetId ID of the asset to update
-     * @param _rentalFee New rental fee in Wei
-     * @param _safetyBond New safety bond amount in Wei
-     */
-    function updateAssetPricing(
-        uint256 _assetId,
-        uint256 _rentalFee,
-        uint256 _safetyBond
-    ) 
-        public 
-        assetExists(_assetId)
-        onlyAssetOwner(_assetId)
-    {
-        require(_rentalFee > 0, "Rental fee must be greater than 0");
-        require(_safetyBond > 0, "Safety bond must be greater than 0");
+    function updateAssetPricing(uint256 _assetId, uint256 _rentalFee, uint256 _safetyBond) 
+        public assetExists(_assetId) onlyAssetOwner(_assetId) {
+        require(_rentalFee > 0 && _safetyBond > 0, "Values must be > 0");
+        require(activeRentalForAsset[_assetId] == 0, "Asset is rented");
         
         assets[_assetId].rentalFee = _rentalFee;
         assets[_assetId].safetyBond = _safetyBond;
-        
-        emit AssetUpdated(_assetId, _rentalFee, _safetyBond, assets[_assetId].isAvailable);
+        emit AssetUpdated(_assetId, _rentalFee, _safetyBond);
     }
     
-    /**
-     * @dev Update asset description
-     * @param _assetId ID of the asset to update
-     * @param _description New description
-     */
-    function updateAssetDescription(
-        uint256 _assetId,
-        string memory _description
-    ) 
-        public 
-        assetExists(_assetId)
-        onlyAssetOwner(_assetId)
-    {
+    function updateAssetDescription(uint256 _assetId, string memory _description) 
+        public assetExists(_assetId) onlyAssetOwner(_assetId) {
         assets[_assetId].description = _description;
     }
     
-    /**
-     * @dev Set asset availability (list/unlist for rent)
-     * @param _assetId ID of the asset
-     * @param _isAvailable New availability status (true = available, false = unlisted)
-     */
-    function setAssetAvailability(
-        uint256 _assetId,
-        bool _isAvailable
-    ) 
-        public 
-        assetExists(_assetId)
-        onlyAssetOwner(_assetId)
-    {
+    function setAssetAvailability(uint256 _assetId, bool _isAvailable) 
+        public assetExists(_assetId) onlyAssetOwner(_assetId) {
+        require(activeRentalForAsset[_assetId] == 0, "Asset is rented");
         assets[_assetId].isAvailable = _isAvailable;
-        
-        emit AssetAvailabilityChanged(_assetId, _isAvailable);
     }
     
     // ============================================
-    // VIEW FUNCTIONS - ASSET REGISTRY
+    // RENTAL CREATION
     // ============================================
     
-    /**
-     * @dev Get complete asset details
-     * @param _assetId ID of the asset
-     * @return owner Address of the asset owner
-     * @return name Name of the asset
-     * @return description Description of the asset
-     * @return rentalFee Rental fee in Wei
-     * @return safetyBond Safety bond in Wei
-     * @return isAvailable Availability status
-     */
-    function getAsset(uint256 _assetId) 
-        public 
-        view 
-        assetExists(_assetId)
-        returns (
-            address owner,
-            string memory name,
-            string memory description,
-            uint256 rentalFee,
-            uint256 safetyBond,
-            bool isAvailable
-        ) 
-    {
-        PhysicalAsset memory asset = assets[_assetId];
-        return (
-            asset.owner,
-            asset.name,
-            asset.description,
-            asset.rentalFee,
-            asset.safetyBond,
-            asset.isAvailable
-        );
-    }
-    
-    /**
-     * @dev Check if asset is available for rent
-     * @param _assetId ID of the asset
-     * @return Boolean indicating availability
-     */
-    function isAssetAvailable(uint256 _assetId) 
-        public 
-        view 
-        assetExists(_assetId)
-        returns (bool) 
-    {
-        return assets[_assetId].isAvailable;
-    }
-    
-    /**
-     * @dev Get total number of registered assets
-     * @return Total asset count
-     */
-    function getTotalAssets() public view returns (uint256) {
-        return assetCount;
-    }
-    
-    /**
-     * @dev Get all assets owned by a specific address
-     * @param _owner Address of the owner
-     * @return Array of asset IDs owned by the address
-     */
-    function getAssetsByOwner(address _owner) 
-        public 
-        view 
-        returns (uint256[] memory) 
-    {
-        uint256[] memory tempAssets = new uint256[](assetCount);
-        uint256 count = 0;
+    function createRental(uint256 _assetId, uint256 _rentalDuration) 
+        public payable assetExists(_assetId) returns (uint256) {
+        PhysicalAsset storage asset = assets[_assetId];
         
-        for (uint256 i = 1; i <= assetCount; i++) {
-            if (assets[i].owner == _owner) {
-                tempAssets[count] = i;
-                count++;
+        require(asset.isAvailable, "Asset not available");
+        require(asset.owner != msg.sender, "Cannot rent own asset");
+        require(_rentalDuration > 0, "Duration must be > 0");
+        require(msg.value == asset.safetyBond, "Incorrect bond amount");
+        
+        rentalCount++;
+        uint256 endTime = block.timestamp + (_rentalDuration * 1 days);
+        
+        rentals[rentalCount] = RentalAgreement({
+            assetId: _assetId,
+            borrower: msg.sender,
+            startTime: 0,
+            endTime: endTime,
+            ownerPickedUp: false,
+            borrowerPickedUp: false,
+            ownerReturned: false,
+            borrowerReturned: false,
+            status: RentalStatus.Pending,
+            actualReturnTime: 0,
+            rentalDuration: _rentalDuration
+        });
+        
+        safetyBondsLocked[msg.sender] += msg.value;
+        asset.isAvailable = false;
+        activeRentalForAsset[_assetId] = rentalCount;
+        
+        emit RentalCreated(rentalCount, _assetId, msg.sender, endTime);
+        emit SafetyBondLocked(msg.sender, msg.value);
+        
+        return rentalCount;
+    }
+    
+    // ============================================
+    // PICKUP HANDSHAKE (Both parties must confirm)
+    // ============================================
+    
+    function confirmPickup(uint256 _rentalId) 
+        public rentalExists(_rentalId) onlyRentalParticipant(_rentalId) {
+        RentalAgreement storage rental = rentals[_rentalId];
+        require(rental.status == RentalStatus.Pending, "Not pending");
+        
+        bool isOwner = (msg.sender == assets[rental.assetId].owner);
+        
+        if (isOwner) {
+            require(!rental.ownerPickedUp, "Already confirmed");
+            rental.ownerPickedUp = true;
+        } else {
+            require(!rental.borrowerPickedUp, "Already confirmed");
+            rental.borrowerPickedUp = true;
+        }
+        
+        emit PickupConfirmed(_rentalId, msg.sender, isOwner);
+        
+        // Activate rental when both confirm
+        if (rental.ownerPickedUp && rental.borrowerPickedUp) {
+            rental.startTime = block.timestamp;
+            rental.status = RentalStatus.Active;
+            emit RentalActivated(_rentalId, rental.startTime);
+        }
+    }
+    
+    // ============================================
+    // RETURN HANDSHAKE (Both parties must confirm)
+    // ============================================
+    
+    function confirmReturn(uint256 _rentalId) 
+        public rentalExists(_rentalId) onlyRentalParticipant(_rentalId) {
+        RentalAgreement storage rental = rentals[_rentalId];
+        require(rental.status == RentalStatus.Active, "Not active");
+        
+        bool isOwner = (msg.sender == assets[rental.assetId].owner);
+        
+        if (isOwner) {
+            require(!rental.ownerReturned, "Already confirmed");
+            rental.ownerReturned = true;
+        } else {
+            require(!rental.borrowerReturned, "Already confirmed");
+            rental.borrowerReturned = true;
+        }
+        
+        emit ReturnConfirmed(_rentalId, msg.sender, isOwner);
+        
+        // Complete rental when both confirm
+        if (rental.ownerReturned && rental.borrowerReturned) {
+            _completeRental(_rentalId);
+        }
+    }
+    
+    // ============================================
+    // PAYMENT PROCESSING & LATE PENALTIES
+    // ============================================
+    
+    function _completeRental(uint256 _rentalId) private {
+        RentalAgreement storage rental = rentals[_rentalId];
+        PhysicalAsset storage asset = assets[rental.assetId];
+        
+        rental.actualReturnTime = block.timestamp;
+        rental.status = RentalStatus.Completed;
+        
+        // Calculate rental fee
+        uint256 totalRentalFee = asset.rentalFee * rental.rentalDuration;
+        
+        // Calculate late penalty
+        uint256 penaltyAmount = 0;
+        bool wasLate = rental.actualReturnTime > rental.endTime;
+        
+        if (wasLate) {
+            uint256 lateTime = rental.actualReturnTime - rental.endTime;
+            uint256 lateUnits = (lateTime / PENALTY_TIME_UNIT) + 1;
+            penaltyAmount = (asset.safetyBond * LATE_PENALTY_RATE * lateUnits) / 100;
+            
+            if (penaltyAmount > asset.safetyBond) {
+                penaltyAmount = asset.safetyBond;
             }
         }
         
-        // Create properly sized array
-        uint256[] memory ownerAssets = new uint256[](count);
-        for (uint256 i = 0; i < count; i++) {
-            ownerAssets[i] = tempAssets[i];
+        // Calculate total charge
+        uint256 totalCharge = totalRentalFee + penaltyAmount;
+        if (totalCharge > asset.safetyBond) {
+            totalCharge = asset.safetyBond;
         }
         
-        return ownerAssets;
+        uint256 amountToReturn = asset.safetyBond - totalCharge;
+        
+        // Update locked bonds
+        safetyBondsLocked[rental.borrower] -= asset.safetyBond;
+        
+        // Transfer payments
+        payable(asset.owner).transfer(totalCharge);
+        if (amountToReturn > 0) {
+            payable(rental.borrower).transfer(amountToReturn);
+        }
+        
+        // Update reputation
+        if (wasLate) {
+            reputationScore[rental.borrower] -= REPUTATION_PENALTY;
+            emit ReputationUpdated(rental.borrower, reputationScore[rental.borrower], -REPUTATION_PENALTY);
+        } else {
+            reputationScore[rental.borrower] += REPUTATION_REWARD;
+            emit ReputationUpdated(rental.borrower, reputationScore[rental.borrower], REPUTATION_REWARD);
+        }
+        
+        reputationScore[asset.owner] += REPUTATION_REWARD;
+        emit ReputationUpdated(asset.owner, reputationScore[asset.owner], REPUTATION_REWARD);
+        
+        // Update counters
+        totalRentalsCompleted[rental.borrower]++;
+        totalRentalsCompleted[asset.owner]++;
+        
+        // Make asset available
+        asset.isAvailable = true;
+        activeRentalForAsset[rental.assetId] = 0;
+        
+        emit SafetyBondReleased(rental.borrower, amountToReturn, totalCharge);
+        emit RentalCompleted(_rentalId, totalCharge, penaltyAmount, wasLate);
     }
     
-    /**
-     * @dev Get all available assets for rent
-     * @return Array of available asset IDs
-     */
-    function getAvailableAssets() 
-        public 
-        view 
-        returns (uint256[] memory) 
-    {
-        uint256[] memory tempAssets = new uint256[](assetCount);
-        uint256 count = 0;
+    // ============================================
+    // RENTAL CANCELLATION
+    // ============================================
+    
+    function cancelRental(uint256 _rentalId) public rentalExists(_rentalId) {
+        RentalAgreement storage rental = rentals[_rentalId];
+        require(rental.status == RentalStatus.Pending, "Can only cancel pending");
+        require(msg.sender == rental.borrower, "Only borrower can cancel");
         
+        PhysicalAsset storage asset = assets[rental.assetId];
+        uint256 bondAmount = asset.safetyBond;
+        
+        safetyBondsLocked[rental.borrower] -= bondAmount;
+        asset.isAvailable = true;
+        activeRentalForAsset[rental.assetId] = 0;
+        rental.status = RentalStatus.Cancelled;
+        
+        payable(rental.borrower).transfer(bondAmount);
+        
+        emit RentalCancelled(_rentalId);
+        emit SafetyBondReleased(rental.borrower, bondAmount, 0);
+    }
+    
+    // ============================================
+    // VIEW FUNCTIONS
+    // ============================================
+    
+    function getAsset(uint256 _assetId) public view assetExists(_assetId)
+        returns (address, string memory, string memory, uint256, uint256, bool) {
+        PhysicalAsset memory a = assets[_assetId];
+        return (a.owner, a.name, a.description, a.rentalFee, a.safetyBond, a.isAvailable);
+    }
+    
+    function getRental(uint256 _rentalId) public view rentalExists(_rentalId)
+        returns (uint256, address, uint256, uint256, bool, bool, bool, bool, RentalStatus, uint256) {
+        RentalAgreement memory r = rentals[_rentalId];
+        return (r.assetId, r.borrower, r.startTime, r.endTime, 
+                r.ownerPickedUp, r.borrowerPickedUp, r.ownerReturned, 
+                r.borrowerReturned, r.status, r.actualReturnTime);
+    }
+    
+    function isRentalLate(uint256 _rentalId) public view rentalExists(_rentalId) returns (bool) {
+        RentalAgreement memory r = rentals[_rentalId];
+        return r.status == RentalStatus.Active && block.timestamp > r.endTime;
+    }
+    
+    function calculateLatePenalty(uint256 _rentalId) public view rentalExists(_rentalId) returns (uint256) {
+        RentalAgreement memory r = rentals[_rentalId];
+        if (block.timestamp <= r.endTime) return 0;
+        
+        uint256 lateTime = block.timestamp - r.endTime;
+        uint256 lateUnits = (lateTime / PENALTY_TIME_UNIT) + 1;
+        uint256 penalty = (assets[r.assetId].safetyBond * LATE_PENALTY_RATE * lateUnits) / 100;
+        
+        if (penalty > assets[r.assetId].safetyBond) {
+            penalty = assets[r.assetId].safetyBond;
+        }
+        return penalty;
+    }
+    
+    function getUserReputation(address _user) public view returns (int256, uint256) {
+        return (reputationScore[_user], totalRentalsCompleted[_user]);
+    }
+    
+    function getAvailableAssets() public view returns (uint256[] memory) {
+        uint256 count = 0;
+        for (uint256 i = 1; i <= assetCount; i++) {
+            if (assets[i].isAvailable) count++;
+        }
+        
+        uint256[] memory available = new uint256[](count);
+        uint256 idx = 0;
         for (uint256 i = 1; i <= assetCount; i++) {
             if (assets[i].isAvailable) {
-                tempAssets[count] = i;
-                count++;
+                available[idx] = i;
+                idx++;
             }
         }
-        
-        // Create properly sized array
-        uint256[] memory availableAssets = new uint256[](count);
-        for (uint256 i = 0; i < count; i++) {
-            availableAssets[i] = tempAssets[i];
-        }
-        
-        return availableAssets;
+        return available;
     }
     
-    // ============================================
-    // RENTAL AGREEMENT FUNCTIONS (Future Task 2)
-    // ============================================
-    
-    // TODO: Add rental creation function
-    // TODO: Add handshake confirmation functions
-    // TODO: Add rental status management
-    
-    // ============================================
-    // COLLATERAL & REPUTATION FUNCTIONS (Future Task 3)
-    // ============================================
-    
-    // TODO: Add deposit safety bond function
-    // TODO: Add release bond function
-    // TODO: Add reputation update functions
-    
-    // ============================================
-    // PAYMENT & PENALTY FUNCTIONS (Future Task 4)
-    // ============================================
-    
-    // TODO: Add payment processing
-    // TODO: Add late penalty calculation
-    // TODO: Add fund distribution
+    function getAssetsByOwner(address _owner) public view returns (uint256[] memory) {
+        uint256 count = 0;
+        for (uint256 i = 1; i <= assetCount; i++) {
+            if (assets[i].owner == _owner) count++;
+        }
+        
+        uint256[] memory owned = new uint256[](count);
+        uint256 idx = 0;
+        for (uint256 i = 1; i <= assetCount; i++) {
+            if (assets[i].owner == _owner) {
+                owned[idx] = i;
+                idx++;
+            }
+        }
+        return owned;
+    }
 }
